@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -43,6 +44,49 @@ def log_tail(path, lines=80, byte_limit=32768):
     except OSError as exc:
         return {"path": path, "text": "", "status": f"Unavailable: {exc.strerror}"}
 
+def tres_values(value):
+    return dict(part.split("=", 1) for part in value.split(",") if "=" in part)
+
+def metric_number(value, memory=False):
+    match = re.fullmatch(r"([0-9]+(?:[.][0-9]+)?)([KMGTPE]?)(?:i?B)?", value or "", re.I)
+    if not match:
+        return None
+    number = float(match.group(1))
+    if memory and match.group(2):
+        number *= 1024 ** ("KMGTPE".index(match.group(2).upper()) + 1)
+    return number if math.isfinite(number) else None
+
+def gpu_accounting(jobs, sampled_at):
+    """Fetch task high-water marks in one bounded, best-effort sstat call."""
+    candidates = [job for job in jobs if job["state"] == "RUNNING" and "gpu" in job["gres"]][:50]
+    if not candidates:
+        return
+    for job in candidates:
+        job["gpu_usage"] = {"util_peak_percent": None, "memory_peak_bytes": None,
+                            "sampled_at": sampled_at, "basis": "Slurm task high-water marks"}
+    try:
+        output = command(["sstat", "--allsteps", "--noheader", "--parsable2", "--noconvert",
+                          "--jobs=" + ",".join(job["id"] for job in candidates),
+                          "--format=JobID,NTasks,TRESUsageInMax"])
+    except (subprocess.SubprocessError, OSError):
+        return
+    by_id = {job["id"]: job for job in candidates}
+    for row in output.splitlines():
+        columns = row.split("|")
+        if len(columns) < 3:
+            continue
+        step, _, metrics = columns[:3]
+        job_id, _, suffix = step.partition(".")
+        if job_id not in by_id or suffix == "extern":
+            continue
+        values = tres_values(metrics)
+        usage = by_id[job_id]["gpu_usage"]
+        for field, key, memory in [("util_peak_percent", "gres/gpuutil", False),
+                                   ("memory_peak_bytes", "gres/gpumem", True)]:
+            value = metric_number(values.get(key), memory)
+            if value is not None:
+                usage[field] = max(usage[field] if usage[field] is not None else value, value)
+
 def collect(user, previous=None, max_log_jobs=6):
     output = command(["squeue", "--noheader", f"--user={user}",
                       "--format=%i|%P|%j|%T|%M|%l|%D|%R|%Q|%C|%m|%b"])
@@ -58,6 +102,7 @@ def collect(user, previous=None, max_log_jobs=6):
         jobs.append(job)
     jobs.sort(key=lambda j: (j["state"] not in ("RUNNING", "COMPLETING"), -j["priority"], j["id"]))
     now = datetime.now(timezone.utc).isoformat()
+    gpu_accounting(jobs, now)
     by_id = {job["id"]: job for job in (previous or {}).get("jobs", [])}
     budget = max_log_jobs
     for job in jobs:
@@ -86,7 +131,7 @@ def collect(user, previous=None, max_log_jobs=6):
         old["logs"] = {key: log_tail(value["path"]) for key, value in old.get("logs", {}).items()}
         recent.append(old)
     return {"schema_version": 1, "generated_at": now, "user": user, "jobs": jobs + recent[:20],
-            "expected_interval_seconds": 300, "metrics": "Slurm allocations; measured utilization is not collected"}
+            "expected_interval_seconds": 300, "metrics": "Slurm allocations and GPU task high-water marks; not live utilization"}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

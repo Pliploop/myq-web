@@ -15,7 +15,7 @@ To view real data, run on the cluster:
 
 Copy that JSON to your laptop and choose Open snapshot. Actual snapshots are private working data and are excluded from Git by .gitignore.
 
-The dashboard supports searching, state filters, job details, stdout/stderr selection, copying logs, and snapshot age/staleness. CPU/GPU counts are allocations, not measured utilization. A snapshot cannot deliver live log streaming.
+Light mode is the default. The Dark / Light control remembers only your theme preference in browser storage. The interface uses flat surfaces, square controls, and thin rules.\n\nThe dashboard supports searching, state filters, job details, stdout/stderr selection, copying logs, and snapshot age/staleness. CPU/GPU counts are allocations. GPU peak activity and GPU memory are Slurm task high-water marks from one batched sstat query per snapshot, not instantaneous utilization. Missing accounting is displayed as unavailable, never as zero. A snapshot cannot deliver live log streaming.
 
 ## Scheduled operation
 
@@ -60,7 +60,7 @@ The website periodically checks GitHub for a newer snapshot while visible. This 
 
 ## Collection limits
 
-- One squeue query per invocation; up to six running-job log lookups.
+- One squeue query and at most one sstat query per invocation; up to six running-job log lookups. GPU accounting covers up to 50 running GPU jobs.\n- GPU task high-water marks can exceed 100% for a task using multiple GPUs; values are preserved and labeled as peaks. Memory is converted from Slurm bytes to GiB in the interface.
 - Each stdout/stderr tail reads at most 32 KiB; output retains 80 lines, each clipped to 500 characters.
 - Recently departed jobs retain log tails for up to one day, capped at 20 jobs. LEFT_QUEUE is not a claim of success; final accounting state is not queried.
 - Files are read without modifying jobs or logs. No Slurm control operations.

@@ -52,6 +52,36 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(result["jobs"][1]["state"],"LEFT_QUEUE")
             self.assertIn("final Slurm state",result["jobs"][1]["log_notice"])
 
+    def test_gpu_accounting_batches_jobs_and_keeps_task_high_water_marks(self):
+        jobs = [{"id":"123","state":"RUNNING","gres":"gres/gpu:2"},
+                {"id":"124","state":"RUNNING","gres":"gres/gpu:1"},
+                {"id":"125","state":"RUNNING","gres":"N/A"}]
+        output = ("123.extern|1|gres/gpuutil=999,gres/gpumem=999G\n"
+                  "123.batch|1|gres/gpuutil=0,gres/gpumem=0\n"
+                  "123.0|2|gres/gpuutil=94,gres/gpumem=18042M\n"
+                  "123.1|2|gres/gpuutil=80,gres/gpumem=20000M\n"
+                  "124.0|1|gres/gpuutil=180,gres/gpumem=1073741824\n")
+        with patch.object(snapshot,"command",return_value=output) as command:
+            snapshot.gpu_accounting(jobs,"now")
+        command.assert_called_once()
+        self.assertIn("--jobs=123,124",command.call_args.args[0])
+        self.assertEqual(jobs[0]["gpu_usage"]["util_peak_percent"],94)
+        self.assertEqual(jobs[0]["gpu_usage"]["memory_peak_bytes"],20000*1024**2)
+        self.assertEqual(jobs[1]["gpu_usage"]["util_peak_percent"],180)
+        self.assertEqual(jobs[1]["gpu_usage"]["memory_peak_bytes"],1024**3)
+        self.assertNotIn("gpu_usage",jobs[2])
+
+    def test_unavailable_gpu_metrics_are_missing_not_zero(self):
+        jobs=[{"id":"123","state":"RUNNING","gres":"gres/gpu:1"}]
+        with patch.object(snapshot,"command",side_effect=subprocess.CalledProcessError(1,"sstat")):
+            snapshot.gpu_accounting(jobs,"now")
+        self.assertIsNone(jobs[0]["gpu_usage"]["util_peak_percent"])
+        with patch.object(snapshot,"command",return_value="123.0|1|gres/gpuutil=0,gres/gpumem=0"):
+            snapshot.gpu_accounting(jobs,"later")
+        self.assertEqual(jobs[0]["gpu_usage"]["util_peak_percent"],0)
+        self.assertIsNone(snapshot.metric_number("NaN"))
+        self.assertIsNone(snapshot.metric_number("N/A"))
+
     def test_failed_collection_does_not_replace_last_good_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             path=Path(root)/"snapshot.json"
